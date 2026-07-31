@@ -1,0 +1,16 @@
+[book]
+title = "Learn Agent the Hard Way"
+description = "从 60 行 Go 代码开始，亲手写出一个能跑工具循环、subagent 和 workflow 的 agent harness。"
+authors = ["Roy Lei"]
+language = "zh-CN"
+src = "src"
+
+[output.html]
+git-repository-url = "https://github.com/Leihb/learn-agent-the-hard-way"
+edit-url-template = "https://github.com/Leihb/learn-agent-the-hard-way/edit/main/{path}"
+default-theme = "rust"
+preferred-dark-theme = "navy"
+
+[output.html.fold]
+enable = true
+level = 0
