@@ -15,7 +15,7 @@
 |---|---|
 | 2022-10 | ReAct 论文。靠 few-shot prompt 教模型输出 Thought / Action / Observation，再**用正则从文本里把动作抠出来**——因为当时的模型没有任何原生的工具接口 |
 | 2023-03 | Reflexion 论文。外挂一个"反思循环"，补弱模型不会自我纠错 |
-| 2023 上半年 | BabyAGI、Plan-and-Execute。拆出 planner 和 executor 两个角色，补弱模型跑长任务会丢线 |
+| 2023 上半年 | BabyAGI、Plan-and-Execute。拆出 planner 和 executor 两个角色，补弱模型任务一长就忘了目标 |
 | **2023-06** | **分水岭：OpenAI 上线 function calling。** 动作从"文本解析"变成协议原生的一等公民 |
 | 2024 | 各家跟进，tool use 成为标配接口 |
 | 2024 之后 | 推理模型（RL 训练的 thinking）把"先规划""会反思"**内化进了模型本身** |
