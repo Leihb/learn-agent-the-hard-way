@@ -52,8 +52,9 @@ func main() {
 	model := os.Getenv("MODEL")
 	if apiKey == "" || model == "" {
 		fmt.Fprintln(os.Stderr, "需要环境变量 OPENAI_API_KEY 和 MODEL")
-		fmt.Fprintln(os.Stderr, `例: export OPENAI_BASE_URL=https://api.deepseek.com/v1`)
+		fmt.Fprintln(os.Stderr, `例: export OPENAI_API_KEY=sk-xxxx`)
 		fmt.Fprintln(os.Stderr, `    export MODEL=deepseek-v4-flash`)
+		fmt.Fprintln(os.Stderr, `    export OPENAI_BASE_URL=https://api.deepseek.com/v1  # 不设则默认 OpenAI 官方`)
 		os.Exit(1)
 	}
 	base := os.Getenv("OPENAI_BASE_URL")
