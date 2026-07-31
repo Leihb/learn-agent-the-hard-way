@@ -131,7 +131,8 @@ func (p anthropicProvider) send(system string, history []message) (string, error
 	if err := json.Unmarshal(raw, &r); err != nil {
 		return "", fmt.Errorf("解析失败: %w", err)
 	}
-	// 回复不是一个字符串，是一个块数组——文字只是其中一种块。
+	// 回复不是一个字符串，是一个列表——每一项自带类型标签，
+	// 正文只是其中一种（还有思考、工具调用……）。我们只挑正文。
 	var reply strings.Builder
 	for _, b := range r.Content {
 		if b.Type == "text" {
