@@ -150,7 +150,7 @@ func main() {
 		// 少了它，下一轮模型看不到自己发起过调用，协议直接报错。
 		history = append(history, msg)
 
-		// 练习 1 的纪律在这里成为循环的铰链：看 finish_reason 决定走哪条路。
+		// 练习 1 的纪律在这里派上大用场：循环走哪条路，看 finish_reason。
 		if r.Choices[0].FinishReason != "tool_calls" {
 			fmt.Println(msg.Content)
 			fmt.Fprintf(os.Stderr, "\n[共 %d 轮 · 最后一轮输入 %d tokens · finish_reason=%s]\n",
