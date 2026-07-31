@@ -241,7 +241,7 @@ func tail(s string, max int) string {
 type registry struct {
 	tools   map[string]tool
 	order   []string        // 保持声明顺序，发给模型的列表要稳定
-	hasRead map[string]bool // read-before-write 台账：这个会话里读过哪些文件
+	hasRead map[string]bool // read-before-write 记录：这个会话里读过哪些文件
 }
 
 func newRegistry(ts ...tool) *registry {
