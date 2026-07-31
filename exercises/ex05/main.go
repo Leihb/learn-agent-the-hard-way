@@ -1,6 +1,6 @@
 // Learn Agent the Hard Way — 练习 5：第一个工具
 //
-// 前四章的一切都是铺垫。这一章，模型第一次伸手碰你的世界：
+// 前四章的一切都是铺垫。这一章，模型第一次碰到你的世界：
 // 声明工具 → 模型请求调用 → 你执行 → 结果回填 → 再问模型。
 // 这个循环就是 agent loop——全书的心脏，今天完整闭环。
 package main
@@ -28,16 +28,16 @@ type toolSpec struct {
 }
 
 // message 长出了两个新字段。它现在能表达三件事：
-// 人说的话（Role=user）、模型的回话或伸手（Role=assistant，可能带 ToolCalls）、
+// 人说的话（Role=user）、模型的回话或调用请求（Role=assistant，可能带 ToolCalls）、
 // 工具的汇报（Role=tool，带 ToolCallID）——第四种也是最后一种 role，到齐了。
 type message struct {
 	Role       string     `json:"role"`
 	Content    string     `json:"content"`
-	ToolCalls  []toolCall `json:"tool_calls,omitempty"`   // assistant 伸手时非空
-	ToolCallID string     `json:"tool_call_id,omitempty"` // role=tool 时必填：这是对哪次伸手的答复
+	ToolCalls  []toolCall `json:"tool_calls,omitempty"`   // assistant 请求调用工具时非空
+	ToolCallID string     `json:"tool_call_id,omitempty"` // role=tool 时必填：这是对哪次调用的答复
 }
 
-// toolCall 是模型的一次伸手。注意 Arguments 是 JSON **字符串**，不是对象——
+// toolCall 是模型发起的一次工具调用。注意 Arguments 是 JSON **字符串**，不是对象——
 // 模型逐字生成它，协议原样转交，解析是你的事。
 type toolCall struct {
 	ID       string `json:"id"`
@@ -147,7 +147,7 @@ func main() {
 		}
 		msg := r.Choices[0].Message
 		// 模型的回复原样塞回历史——包括 tool_calls。
-		// 少了它，下一轮模型看不到自己伸过手，协议直接报错。
+		// 少了它，下一轮模型看不到自己发起过调用，协议直接报错。
 		history = append(history, msg)
 
 		// 练习 1 的纪律在这里成为循环的铰链：看 finish_reason 决定走哪条路。
@@ -158,13 +158,13 @@ func main() {
 			return
 		}
 
-		// 模型伸手了。逐个执行，每次伸手回填一条 role:"tool" 消息。
+		// 模型要调工具。逐个执行，每个调用回填一条 role:"tool" 消息。
 		for _, tc := range msg.ToolCalls {
 			fmt.Fprintf(os.Stderr, "[round %d] %s(%s)\n", round, tc.Function.Name, tc.Function.Arguments)
 			result := execute(tc.Function.Name, tc.Function.Arguments)
 			history = append(history, message{
 				Role:       "tool",
-				ToolCallID: tc.ID, // 一次伸手一张回执，靠这个 ID 对上号
+				ToolCallID: tc.ID, // 一次调用一张回执，靠这个 ID 对上号
 				Content:    result,
 			})
 		}
