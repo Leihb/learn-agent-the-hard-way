@@ -55,7 +55,8 @@
 - [练习 27：loop——谁来触发下一轮](part7/ex27.md)
 - [练习 28：goal——给模型自己看的进度条](part7/ex28.md)
 - [练习 29：bash 工具重构——后台任务](part7/ex29.md)
-- [练习 30：终章——你手里的这个东西](part7/ex30.md)
+- [练习 30：更多工具——web_search、web_fetch、grep、glob](part7/ex30.md)
+- [练习 31：终章——你手里的这个东西](part7/ex31.md)
 
 ---
 
