@@ -792,9 +792,16 @@ func main() {
 	}
 	sess.History = append(sess.History, message{Role: "user", Content: task})
 
+	// 这一刻是估算值唯一有用武之地的时候：还没发出过任何请求，checkBudget
+	// 依赖的真实数字根本不存在——尤其是 -c 恢复一个老会话时，History 可能已经
+	// 很大，你想在花钱之前先摸个底，能查的只有这个粗略估算。
 	window := effectiveContextWindow(model)
-	fmt.Fprintf(os.Stderr, "[窗口预估: %s → %d tokens（发出第一个请求前，估算值: %d tokens）]\n",
-		model, window, estimateTokens(sess.History))
+	preEstimate := estimateTokens(sess.History)
+	fmt.Fprintf(os.Stderr, "[窗口: %s → %d tokens（发出第一个请求前，估算值: %d tokens）]\n",
+		model, window, preEstimate)
+	if float64(preEstimate) >= float64(window)*budgetFraction {
+		fmt.Fprintf(os.Stderr, "⚠️  恢复的历史估算下来已经接近预算上限，还没发请求就先说一声——真实数字要等第一轮回来才知道\n")
+	}
 
 	// agent loop 的结构和练习 5 完全一样。变化只有两处：
 	// 工具声明从注册表拿（reg.definitions），分发交给注册表（reg.execute）；
