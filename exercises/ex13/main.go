@@ -790,7 +790,7 @@ func compactKeepBudget(window, trigger int) int {
 // safeSplitIndex 找压缩的分割点：分割点之前的消息拿去总结，之后的原样保留。
 // 分割点必须落在一条真正的 user 消息前面。在这套 OpenAI 协议里这条件很好判
 // 断：工具的回执走独立的 "tool" role，从不会跟 user 消息混在一起，看 Role
-// 就够了——这比 octo 蒸馏自的 Anthropic 协议简单，那边 tool_result 也搭在
+// 就够了——这比 octo 实现的 Anthropic 消息协议简单，那边 tool_result 也搭在
 // user 消息上，得专门写一个 IsPlainUserMessage 去分辨"这是真用户话还是工具
 // 回执的壳"，协议本身把角色分得干净，这道甄别在这里就用不上。
 func safeSplitIndex(history []message, keepBudget int) int {
