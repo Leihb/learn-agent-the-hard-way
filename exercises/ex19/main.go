@@ -1219,7 +1219,7 @@ func main() {
 		resumeID, args = args[1], args[2:]
 	}
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, `用法: ./ex14 "你的任务"  或  ./ex14 -c <session-id> "你的任务"`)
+		fmt.Fprintln(os.Stderr, `用法: ./ex19 "你的任务"  或  ./ex19 -c <session-id> "你的任务"`)
 		os.Exit(1)
 	}
 	task := args[0]
