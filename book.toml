@@ -5,11 +5,15 @@ authors = ["Roy Lei"]
 language = "zh-CN"
 src = "src"
 
+[preprocessor.tabs]
+
 [output.html]
 git-repository-url = "https://github.com/Leihb/learn-agent-the-hard-way"
 edit-url-template = "https://github.com/Leihb/learn-agent-the-hard-way/edit/main/{path}"
 default-theme = "rust"
 preferred-dark-theme = "navy"
+additional-css = ["theme/tabs.css"]
+additional-js = ["theme/tabs.js"]
 
 [output.html.fold]
 enable = true
