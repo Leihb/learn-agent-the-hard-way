@@ -1,4 +1,6 @@
-# Learn Agent the Hard Way
+# 笨办法学 Agent · Learn Agent the Hard Way
+
+**《笨办法学 Agent：从 60 行代码到一个完整的 harness》**
 
 **从 60 行 Go 代码开始，亲手写出一个 agent。**
 
