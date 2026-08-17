@@ -2,7 +2,7 @@
 
 **《笨办法学 Agent：从 60 行代码到一个完整的 harness》**
 
-**从 60 行 Go 代码开始，亲手写出一个 agent。**
+**从 60 行代码开始，亲手写出一个 agent。**
 
 **agent = LLM + tool use。** 模型你改不了，循环只有几十行——一个 agent 和另一个 agent
 的全部差别，都在工具的设计里。这本书带你从一次裸 HTTP 请求开始，把工具循环、权限系统、
@@ -19,9 +19,18 @@
 ## 怎么读
 
 - **跟着敲，不要复制粘贴。** 这是"the hard way"的全部含义。
-- 你需要：Go 1.22+、任意一家模型服务商的 key（DeepSeek / Kimi / OpenAI 官方，
+- 你需要：Go 1.22+（或 Python 3.10+ / Node 18+，见下方"三种语言"）、
+  任意一家模型服务商的 key（DeepSeek / Kimi / OpenAI 官方，
   或本机 Ollama——第一个练习起就支持，不花一分钱）。
 - 每个练习的参考实现在 [`exercises/`](exercises/)，**卡住了再看**。
+
+## 三种语言
+
+代码以 Go 为母本，Python 和 JavaScript 版本正在逐章补齐。
+凡是正文里出现语言切换标签的章节，三种语言都过了同一套真机验证
+（DeepSeek + 本机 Ollama）；点一次标签，全书跟着你切换。
+参考实现的位置：Go 在 `exercises/exNN/`，Python 和 JavaScript
+在对应的 `exercises/exNN/python/` 和 `exercises/exNN/node/`。
 
 ## 目录
 
