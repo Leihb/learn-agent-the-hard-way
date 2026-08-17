@@ -3915,6 +3915,17 @@ func runInterruptible(base, apiKey, model string, reg *registry, sess *session, 
 		case line, ok := <-lines:
 			if !ok {
 				lines = nil // Ctrl+D：这个 case 从此不再触发，别空转
+				// 键盘从此没人了，悬着的和排队的批准不能永远等下去——
+				// 没人能说 y，答案就是 N（fail closed，练习 23 的老规矩）。
+				if pending != nil {
+					fmt.Fprintln(os.Stderr, "[输入已关闭，没人能批准——按 N 处理]")
+					pending.resp <- false
+					pending = nil
+				}
+				for _, q := range askQueue {
+					q.resp <- false
+				}
+				askQueue = nil
 				continue
 			}
 			if pending != nil {
@@ -3956,6 +3967,13 @@ func runInterruptible(base, apiKey, model string, reg *registry, sess *session, 
 			fmt.Fprintln(os.Stderr, "[后台任务完成，这一轮还没跑完，当插话塞进去]")
 
 		case req := <-askCh:
+			// 键盘已经关了（Ctrl+D / 管道读完），这个问题永远等不到 y——
+			// 立刻按 N 答复，别让工具吊在一个没人会回答的问题上。
+			if lines == nil {
+				fmt.Fprintln(os.Stderr, "[输入已关闭，没人能批准——按 N 处理]")
+				req.resp <- false
+				continue
+			}
 			// 并发的子 agent 可能同时要批准。一次只问一个，其余排队——
 			// 蒸馏自 octo 的模态队列（openModal/modalQueue）：直接覆盖
 			// 会把前一个问题的等待方永远晾在那儿。

@@ -3931,9 +3931,6 @@ func runInterruptible(base, apiKey, model string, reg *registry, sess *session, 
 				lines = nil // Ctrl+D：这个 case 从此不再触发，别空转
 				// 键盘从此没人了，悬着的和排队的批准不能永远等下去——
 				// 没人能说 y，答案就是 N（fail closed，练习 23 的老规矩）。
-				// 这个坑的前提变化很隐蔽：练习 9 的 confirm 自己读 stdin，
-				// EOF 天然当拒绝；练习 25 把它改成问答通道之后，"没人在
-				// 键盘前"变成了"问题永远悬着"，管道跑法会整个挂死。
 				if pending != nil {
 					fmt.Fprintln(os.Stderr, "[输入已关闭，没人能批准——按 N 处理]")
 					pending.resp <- false
