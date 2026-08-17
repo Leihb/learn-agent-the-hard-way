@@ -2123,7 +2123,7 @@ func reasonSuffix(reason string) string {
 // ---- goal 层：给模型自己看的进度条 ----
 
 // goalStatus 是目标的状态。octo 里有六种，本书留五种（少的那个是
-// usage_limited：续 turn 撞上供应商限流时由系统把 goal 停靠起来，
+// usage_limited：续 turn 撞上供应商限流时由系统把 goal 挂起，
 // 常见问题里交代）。
 type goalStatus string
 

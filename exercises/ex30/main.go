@@ -2195,7 +2195,7 @@ func reasonSuffix(reason string) string {
 // ---- goal 层：给模型自己看的进度条 ----
 
 // goalStatus 是目标的状态。octo 里有六种，本书留五种（少的那个是
-// usage_limited：续 turn 撞上供应商限流时由系统把 goal 停靠起来，
+// usage_limited：续 turn 撞上供应商限流时由系统把 goal 挂起，
 // 常见问题里交代）。
 type goalStatus string
 
@@ -2827,7 +2827,7 @@ func (m *bgManager) start(command string, mode bgMode) (string, error) {
 			p.append(append(scanner.Bytes(), '\n'))
 		}
 	}()
-	// 守望者：等进程退出，关掉管道让读者看到 EOF，再等读者把管道排干，
+	// 收尾的：等进程退出，关掉管道让读者看到 EOF，再等读者把管道排干，
 	// 然后才能发完成通知——顺序错了，跑得快的进程会把尾巴输出弄丢：
 	// 通知发出去的时候读者还没搬完。
 	go func() {
@@ -4529,7 +4529,7 @@ func (p *page) navigate(ctx context.Context, url string) error {
 // 不是 DOM 里的一个节点。元素在视口外（坐标是负数）、或者被加载遮罩、
 // 弹层、折叠的侧栏挡着，click 都会发得一声不响、什么都没发生——模型
 // 看到"已点击"，页面却纹丝不动，下一步就开始瞎猜。elementFromPoint
-// 问的正是"这个点上真正接客的是谁"，不是目标就直说。
+// 问的正是"这个点上真正收到点击的是谁"，不是目标就直说。
 func (p *page) elementCenter(ctx context.Context, selector string) (x, y float64, err error) {
 	expr := fmt.Sprintf(`(() => {
 		let el;

@@ -74,7 +74,7 @@ func TestAntiPollingWindow(t *testing.T) {
 	}
 }
 
-// 真实进程：快退出的命令，完成通知必须带上它的全部输出（守望者要等
+// 真实进程：快退出的命令，完成通知必须带上它的全部输出（收尾的要等
 // 读者排干管道才发通知），async 秒完的还要带"不需要后台"的教育。
 func TestStartAsyncNotifyKeepsOutputAndNudges(t *testing.T) {
 	m := newTestBg()
@@ -129,7 +129,7 @@ func TestInteractiveStdinAndKillAll(t *testing.T) {
 	}
 	m.killAll()
 	select {
-	case <-m.done: // cat 被杀，守望者发出通知
+	case <-m.done: // cat 被杀，收尾的发出通知
 	case <-time.After(5 * time.Second):
 		t.Fatal("killAll 之后等不到退出通知")
 	}

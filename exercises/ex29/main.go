@@ -2184,7 +2184,7 @@ func reasonSuffix(reason string) string {
 // ---- goal 层：给模型自己看的进度条 ----
 
 // goalStatus 是目标的状态。octo 里有六种，本书留五种（少的那个是
-// usage_limited：续 turn 撞上供应商限流时由系统把 goal 停靠起来，
+// usage_limited：续 turn 撞上供应商限流时由系统把 goal 挂起，
 // 常见问题里交代）。
 type goalStatus string
 
@@ -2816,7 +2816,7 @@ func (m *bgManager) start(command string, mode bgMode) (string, error) {
 			p.append(append(scanner.Bytes(), '\n'))
 		}
 	}()
-	// 守望者：等进程退出，关掉管道让读者看到 EOF，再等读者把管道排干，
+	// 收尾的：等进程退出，关掉管道让读者看到 EOF，再等读者把管道排干，
 	// 然后才能发完成通知——顺序错了，跑得快的进程会把尾巴输出弄丢：
 	// 通知发出去的时候读者还没搬完。
 	go func() {
