@@ -3,3 +3,5 @@ exercises/*/ex[0-9]*
 !exercises/*/*.go
 !exercises/*/go.mod
 .DS_Store
+__pycache__/
+node_modules/
