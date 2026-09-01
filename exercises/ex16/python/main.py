@@ -1,0 +1,1033 @@
+# Learn Agent the Hard Way — 练习 16：最小 skill 加载器
+#
+# 前十五章的知识全在代码里——工具怎么用、危险命令怎么拦、记忆怎么读写，
+# 写死在常量和 BASE_PROMPT 里，改一条都要重新编译（或者重新跑）。这一章
+# 加一种新知识：写在磁盘上、模型按需读的说明书，Claude Code 管它叫 skill。
+# 这一章只解决"发现 + 注入"这一步：让模型知道有哪些说明书能读，以及
+# 怎么去读到一份的正文。它会不会在两份说明书里选对那一份，是下一章的问题。
+import json
+import os
+import secrets
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from datetime import datetime
+
+# ---- 工具层 ----
+# 每个工具是一个类，两个方法：一份给模型看的声明（definition），
+# 一个真正干活的函数（execute）。octo 里同名接口也是这两个方法——
+# 这不是巧合，是这件事的最小形状。
+
+
+# ReadFileTool 就是练习 5 的 read_file，装进类的壳。
+class ReadFileTool:
+    def definition(self):
+        return {
+            "name": "read_file",
+            "description": "读取一个本地文件，返回它的文本内容。修改文件前必须先用它读一遍。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "要读取的文件路径"},
+                },
+                "required": ["path"],
+            },
+        }
+
+    def execute(self, args):
+        try:
+            params = json.loads(args)
+        except json.JSONDecodeError as e:
+            return "错误: 参数不是合法 JSON: " + str(e)
+        try:
+            with open(params.get("path", ""), encoding="utf-8", errors="replace") as f:
+                return f.read()
+        except OSError as e:
+            return "错误: " + str(e)
+
+
+# WriteFileTool 整个写入一个文件（不存在则创建，存在则覆盖）。
+class WriteFileTool:
+    def definition(self):
+        return {
+            "name": "write_file",
+            "description": "把内容完整写入一个文件。文件不存在就创建，存在就整个覆盖。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "目标文件路径"},
+                    "content": {"type": "string", "description": "要写入的完整内容"},
+                },
+                "required": ["path", "content"],
+            },
+        }
+
+    def execute(self, args):
+        try:
+            params = json.loads(args)
+        except json.JSONDecodeError as e:
+            return "错误: 参数不是合法 JSON: " + str(e)
+        path = params.get("path", "")
+        content = params.get("content", "")
+        try:
+            backup = backup_if_exists(path)
+        except OSError as e:
+            return "错误: 备份旧内容失败，为安全起见拒绝覆盖: " + str(e)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
+        except OSError as e:
+            return "错误: " + str(e)
+        # len(content) 是字符数不是字节数——中文会对不上，按 UTF-8 编码后再数
+        size = len(content.encode("utf-8"))
+        if backup:
+            return f"已把旧内容备份到 {backup}，然后写入 {path}（{size} 字节）"
+        return f"已写入 {path}（{size} 字节）"
+
+
+# EditFileTool 精确替换文件中的一段文本。octo 的设计原样蒸馏：
+# old_string 必须在文件里恰好出现一次——多了说明定位不唯一，少了说明找错了，
+# 两种都拒绝执行。这比"按行号改"可靠得多：行号在模型的记忆里会漂，原文不会。
+class EditFileTool:
+    def definition(self):
+        return {
+            "name": "edit_file",
+            "description": "在已有文件里做一次精确替换。old_string 必须与文件现有内容逐字一致，"
+                           "且只出现一次——不唯一时请带上足够的上下文再试。文件必须已存在（创建用 write_file）。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "目标文件路径"},
+                    "old_string": {"type": "string", "description": "要找到的原文，必须唯一"},
+                    "new_string": {"type": "string", "description": "替换成的新文本，可以为空（等于删除）"},
+                },
+                "required": ["path", "old_string", "new_string"],
+            },
+        }
+
+    def execute(self, args):
+        try:
+            params = json.loads(args)
+        except json.JSONDecodeError as e:
+            return "错误: 参数不是合法 JSON: " + str(e)
+        path = params.get("path", "")
+        old = params.get("old_string", "")
+        new = params.get("new_string", "")
+        try:
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+        except OSError as e:
+            return "错误: " + str(e)
+        if old == "":
+            return "错误: old_string 不能为空"
+        n = text.count(old)
+        if n == 0:
+            return "错误: old_string 在文件里找不到——和 read_file 看到的原文逐字对一下"
+        if n > 1:
+            return f"错误: old_string 出现了 {n} 次，无法确定改哪一处——多带几行上下文让它唯一"
+        text = text.replace(old, new, 1)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+        except OSError as e:
+            return "错误: " + str(e)
+        return "已替换 " + path + " 中的一处文本"
+
+
+# ---- bash：特权工具 ----
+
+# 超时是双层的：不传用默认值，传了也有上限——上限保护的是你，不是模型。
+DEFAULT_BASH_TIMEOUT = 30  # 秒
+MAX_BASH_TIMEOUT = 120     # 秒
+MAX_BASH_OUTPUT = 8 * 1024  # 字节。工具结果会原样进上下文，必须封顶
+
+# WORK_DIR 在启动时定死。每次 bash 调用都是一个全新进程，
+# 模型在命令里 cd 到哪里，都随那个进程一起消失——工作目录由 harness 持有。
+WORK_DIR = os.getcwd()
+
+
+class BashTool:
+    def definition(self):
+        return {
+            "name": "bash",
+            "description": "在系统 shell 里运行一条命令，返回 stdout 和 stderr。"
+                           "命令总是在固定的工作目录执行，cd 不会跨调用生效。"
+                           "默认 30 秒超时；预计更久就传 timeout（整数秒，上限 120）。"
+                           "能用 read_file / write_file / edit_file 完成的事，优先用那些专用工具。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "要执行的 shell 命令"},
+                    "timeout": {"type": "integer", "description": "超时秒数，可选，默认 30，上限 120"},
+                },
+                "required": ["command"],
+            },
+        }
+
+    def execute(self, args):
+        try:
+            params = json.loads(args)
+        except json.JSONDecodeError as e:
+            return "错误: 参数不是合法 JSON: " + str(e)
+        command = params.get("command", "") or ""
+        if not command.strip():
+            return "错误: command 不能为空"
+        d = DEFAULT_BASH_TIMEOUT
+        timeout_arg = params.get("timeout") or 0
+        if timeout_arg > 0:
+            d = timeout_arg
+            if d > MAX_BASH_TIMEOUT:
+                return (f"错误: timeout 最大 {MAX_BASH_TIMEOUT} 秒。"
+                        "要跑更久的命令，把它拆小，或者放弃在一次调用里等它")
+
+        # shell=True 在 POSIX 上就是 /bin/sh -c，和 Go 版一致；
+        # stdout=PIPE + stderr=STDOUT 让两路在操作系统层面合成一路，
+        # 跟 Go 的 cmd.CombinedOutput() 是同一件事。
+        try:
+            result = subprocess.run(
+                command,
+                shell=True,
+                cwd=WORK_DIR,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=d,
+            )
+        except subprocess.TimeoutExpired as e:
+            # 被杀也要把已产生的输出交回去——死前的输出往往就是死因。
+            text = tail(e.stdout or b"", MAX_BASH_OUTPUT)
+            return f"错误: 命令超过 {d} 秒被终止。被杀前的输出：\n{text}"
+
+        text = tail(result.stdout, MAX_BASH_OUTPUT)
+        if result.returncode != 0:
+            # 非零退出不是异常，是情报：让模型自己读 exit code 和错误输出。
+            return f"{text}\n[exit status {result.returncode}]"
+        if text == "":
+            return "(命令成功，无输出)"
+        return text
+
+
+# tail 超长时保留结尾——命令的结论和报错几乎总在最后，开头多半是刷屏。
+# 在字节层面截断（跟 write_file 的字节计数是同一个讲究），最后才解码成字符串。
+def tail(data, max_bytes):
+    if len(data) <= max_bytes:
+        return data.decode("utf-8", errors="replace")
+    cut = data[-max_bytes:]
+    i = cut.find(b"\n")
+    if i >= 0:
+        cut = cut[i + 1:]  # 对齐到整行，别吐半截行
+    skipped = len(data) - len(cut)
+    return f"[... 前面 {skipped} 字节被截断，只保留结尾 ...]\n" + cut.decode("utf-8", errors="replace")
+
+
+# ---- 权限层：拦下危险命令 ----
+
+# decision 是权限检查的结论，档位从低到高：allow < ask < deny。
+DECISION_ALLOW = 0
+DECISION_ASK = 1
+DECISION_DENY = 2
+
+# BASH_RULES 蒸馏自 octo 的 internal/permission/defaults.yml——声明顺序不重要，
+# 重要的是档位：deny 赢 ask，ask 赢 allow。一条规则都没命中时，隐式默认是
+# ask——宁可多问一句，不要放过一个没见过的命令。
+BASH_RULES = [
+    ("rm -rf /", DECISION_DENY),
+    ("rm -rf ~", DECISION_DENY),
+    ("rm -rf", DECISION_ASK),
+    ("sudo ", DECISION_ASK),
+    ("git push --force", DECISION_ASK),
+    ("curl ", DECISION_ASK),
+    ("ls", DECISION_ALLOW),
+    ("cat ", DECISION_ALLOW),
+    ("pwd", DECISION_ALLOW),
+    ("echo ", DECISION_ALLOW),
+    ("git status", DECISION_ALLOW),
+]
+
+
+# classify_bash 给一条 shell 命令分档。分三遍独立扫描，而不是一遍碰到就返回，
+# 就是为了让"deny 赢 ask 赢 allow"这件事跟规则声明的先后顺序无关。
+def classify_bash(cmd):
+    for pattern, decide in BASH_RULES:
+        if decide == DECISION_DENY and pattern in cmd:
+            return DECISION_DENY
+    for pattern, decide in BASH_RULES:
+        if decide == DECISION_ASK and pattern in cmd:
+            return DECISION_ASK
+    trimmed = cmd.lstrip(" \t")
+    for pattern, decide in BASH_RULES:
+        if decide != DECISION_ALLOW or pattern not in cmd:
+            continue
+        # allow 比 deny/ask 挑剔：命令必须以这个词开头，且整条命令里不能有
+        # shell 的链接符号——否则 "ls && rm -rf /" 会被 "ls" 这条规则放行。
+        if trimmed.startswith(pattern) and not contains_shell_chain(cmd):
+            return DECISION_ALLOW
+    return DECISION_ASK
+
+
+# contains_shell_chain 检查命令里有没有把一条命令接到另一条上的符号。
+def contains_shell_chain(cmd):
+    return any(ch in cmd for ch in ";|&$()`\n")
+
+
+# ask_approval 停下来问人，不是问模型——危险命令要过这一关，
+# 模型自己怎么想不算数。读不到回答（比如脚本化调用、没有终端）一律按拒绝处理，
+# 安全边界宁可保守，不能因为读不到输入就放行。
+def ask_approval(cmd):
+    print(f"\n⚠️  模型想执行: {cmd}\n允许吗？(y/N) ", end="", file=sys.stderr, flush=True)
+    try:
+        line = sys.stdin.readline()
+    except OSError:
+        return False
+    if not line:  # 读到 EOF，没有任何输入
+        return False
+    answer = line.strip().lower()
+    return answer in ("y", "yes")
+
+
+def command_of(args):
+    try:
+        return (json.loads(args) or {}).get("command", "") or ""
+    except json.JSONDecodeError:
+        return ""
+
+
+# ---- 备份层：覆盖前留一份 ----
+
+# TRASH_DIR 是备份落地的地方，就在工作目录底下——足够找、足够简单，
+# 不需要 octo 真实实现里那套按项目哈希分桶的复杂结构。
+TRASH_DIR = ".trash"
+
+
+# backup_if_exists 在覆盖一个已存在的文件前，把旧内容原样复制进 TRASH_DIR，
+# 文件名前缀时间戳避免撞名。目标文件本来就不存在时什么都不做，返回空字符串
+# ——没有"旧版本"可备份。这是覆盖前的最后一步，不是覆盖的替代品：
+# write_file 该做的事一件没少，只是多了一份退路。
+def backup_if_exists(path):
+    if not os.path.exists(path):
+        return ""
+    os.makedirs(TRASH_DIR, exist_ok=True)
+    with open(path, "rb") as f:
+        data = f.read()
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    dest = os.path.join(TRASH_DIR, f"{ts}_{os.path.basename(path)}")
+    with open(dest, "wb") as f:
+        f.write(data)
+    return dest
+
+
+# restore 找 TRASH_DIR 里这个文件名最新的一份备份，写回原路径。恢复动作
+# 本身也先给"现在这份"备份一次——误删保护对自己也生效，不会因为你手滑
+# 恢复错了版本就白白丢掉当前内容。
+def restore(path):
+    try:
+        entries = os.listdir(TRASH_DIR)
+    except OSError as e:
+        print(f"错误: 没有找到 {TRASH_DIR} 目录，或读取失败: {e}", file=sys.stderr)
+        return 1
+    suffix = "_" + os.path.basename(path)
+    newest = ""
+    for name in entries:
+        if name.endswith(suffix) and name > newest:
+            newest = name
+    if not newest:
+        print(f"错误: {TRASH_DIR} 里没有 {os.path.basename(path)} 的备份", file=sys.stderr)
+        return 1
+    try:
+        backup_if_exists(path)
+    except OSError as e:
+        print(f"错误: 备份当前版本失败，为安全起见拒绝恢复: {e}", file=sys.stderr)
+        return 1
+    src = os.path.join(TRASH_DIR, newest)
+    try:
+        with open(src, "rb") as f:
+            data = f.read()
+        with open(path, "wb") as f:
+            f.write(data)
+    except OSError as e:
+        print(f"错误: {e}", file=sys.stderr)
+        return 1
+    print(f"已从 {src} 恢复到 {path}")
+    return 0
+
+
+# ---- 注册表层 ----
+
+# Registry 按名字分发工具调用，并在这一层安装横切纪律。
+# 纪律装在注册表而不是某个工具里，因为它管的是工具**之间**的关系。
+class Registry:
+    def __init__(self, *tools):
+        # Go 版要单独存一份 order 切片保持声明顺序（map 遍历是乱序的）；
+        # Python 的 dict 自带插入序，这个字段直接省了。
+        self.tools = {}
+        self.has_read = set()  # read-before-write 记录：这个会话里读过哪些文件
+        for t in tools:
+            self.tools[t.definition()["name"]] = t
+
+    # definitions 生成发给模型的 tools 数组。
+    def definitions(self):
+        return [{"type": "function", "function": t.definition()}
+                for t in self.tools.values()]
+
+    # execute 查表分发。改文件的调用先过 read-before-write 检查：
+    # 没读过就想改一个已存在的文件？拒绝——模型会先去读，然后带着事实回来。
+    # bash 调用还要多过一关：权限检查。这一关不问模型愿不愿意，
+    # deny 直接拒绝、ask 停下来问人——两种情况下面这行 t.execute 都不会被跑到，
+    # 真正跑 subprocess.run 的代码，危险命令根本够不着。
+    def execute(self, name, args):
+        t = self.tools.get(name)
+        if t is None:
+            return "错误: 未知工具 " + name
+        if name in ("write_file", "edit_file"):
+            path = path_of(args)
+            if path and os.path.exists(path) and path not in self.has_read:
+                return "错误: " + path + " 已存在但这个会话里还没读过它。先用 read_file 看一眼，再来修改。"
+        if name == "bash":
+            cmd = command_of(args)
+            decision = classify_bash(cmd)
+            if decision == DECISION_DENY:
+                return "错误: 权限拒绝——这条命令匹配了硬性禁止规则，不会执行，也不会询问。"
+            if decision == DECISION_ASK and not ask_approval(cmd):
+                return "错误: 权限拒绝——用户没有批准这条命令。"
+        result = t.execute(args)
+        # 调用成功就记账：读过的文件可以改；刚写完的文件模型知道最新内容，也算读过。
+        path = path_of(args)
+        if path and not result.startswith("错误:"):
+            self.has_read.add(path)
+        return result
+
+
+def path_of(args):
+    try:
+        return (json.loads(args) or {}).get("path", "") or ""
+    except json.JSONDecodeError:
+        return ""
+
+
+# ---- base prompt：给模型的说明书 ----
+
+# BASE_PROMPT 蒸馏自 octo 的 internal/prompt/base.md——生产 harness 里
+# 模型真实读到的规矩，这里只留下和我们这四个工具相关的几条。
+# 它坐进 history 第 0 位的 system 消息，练习 3 你已经知道这个位置；
+# 没讲过的是：为什么内容从此定死，一个字都不该在会话中途改。
+BASE_PROMPT = """你是一个能操作本地文件和 shell 的助手，通过工具真正执行动作，而不是描述打算做什么。
+
+- 能用 read_file / write_file / edit_file 完成的事，优先用它们；bash 留给专用工具做不到的事（跑测试、跑 git、装依赖、查系统信息）。
+- 修改一个已经存在的文件前，必须先用 read_file 读过它一遍——这条规矩不因为你换了工具执行修改就不算数：用 bash 的 echo / sed / tee 等方式直接改文件内容，同样要先读一遍再动手。能用 edit_file 完成的局部修改，优先用 edit_file 而不是 sed -i，这样改动会经过校验，而不是绕开它。
+- 只做任务要求的改动，不顺手重构、不改无关代码。"""
+
+
+# ---- 规则文件层：项目自己的约定 ----
+
+# PROJECT_RULES_FILE 蒸馏自 octo 的 ProjectContextFile（.octorules）——
+# 每个项目自己的行为约定，跟 BASE_PROMPT 那种"放之四海皆准"的规矩不同，
+# 这份文件只对当前项目生效，随项目一起进版本库。
+PROJECT_RULES_FILE = ".harnessrules"
+
+
+# read_project_rules 读工作目录下的 .harnessrules，文件不存在或读不出来
+# 就返回空字符串——没有这份文件是完全正常的状态，不是错误。
+def read_project_rules():
+    try:
+        with open(PROJECT_RULES_FILE, encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+# ---- 记忆层：模型自己维护的跨会话笔记 ----
+
+# MEMORY_FILE 蒸馏自 octo 的 MEMORY.md——但只留最小的那一部分：一个项目
+# 一份文件，本章不做 octo 真实实现里的按仓库分目录、跨项目继承、200 行/25KB
+# 截断预算，够用就好，把"跨会话"这一件事立住是这一章的唯一目的。
+MEMORY_FILE = "MEMORY.md"
+
+
+# read_memory 读工作目录下的 MEMORY.md，文件不存在就返回空字符串——
+# 全新项目还没写过这份文件，这是正常状态，不是错误。
+def read_memory():
+    try:
+        with open(MEMORY_FILE, encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+# MEMORY_GUIDANCE 是这一层唯一新增的"规矩"，蒸馏自 octo 真实的 memory 注入
+# 说明：MEMORY.md 是什么、什么值得写、用什么工具写。这段话不因文件是否
+# 存在而变化——第一次跑到这个项目，模型也要知道有这么个地方能写。
+# 全书唯一一处故意不新增专用工具的地方：记东西用 write_file，改错一条、
+# 删掉一条用 edit_file——和练习 6 已经有的工具是同一套，没有专门的
+# remember/forget。
+MEMORY_GUIDANCE = f"""# 跨会话记忆 ({MEMORY_FILE})
+
+{MEMORY_FILE} 是你自己维护的记忆文件，不是这次任务的草稿。这次任务
+结束后，下一次全新会话——不是用 -c 续接这一次，是完全重新开始的下一次
+——会在系统提示里重新读到你现在写下的内容。
+
+- 值得写：用户明确要求记住的偏好、和默认做法不一样的项目约定、你自己
+  验证过、以后大概率还用得上的结论。不值得写：这次任务本身的中间状态、
+  代码改动的具体内容——那些内容已经在文件和 git 历史里，不需要在这里
+  重复一份。
+- 没有专门的"记住"或"忘记"工具。{MEMORY_FILE} 就是一个普通文件：
+  想写新的用 write_file，想改一条用 edit_file，想删掉一条也是 edit_file
+  ——记错一件事和改错一行代码，是同一种操作，用同一套工具。
+- 引用这份文件里的内容之前，先确认它现在还成立——项目会变，你之前记下
+  的事，不保证放到现在还是真的。"""
+
+
+# ---- skill 层：写在磁盘上、按需读的说明书 ----
+
+# SKILLS_ROOT 蒸馏自 octo 的三层发现（default/user/project），本章只留
+# 最简单的一层——一个项目一个目录，够用就好：这一章要立住的是"发现 +
+# 注入"这一件事，不是完整的优先级覆盖体系。
+SKILLS_ROOT = ".harness-skills"
+
+
+# Skill 是一份发现到的说明书。body 是正文——只有模型真的调用 skill 工具
+# 要来的时候才会离开磁盘、进入对话。
+class Skill:
+    def __init__(self, name, description, body, dir):
+        self.name = name
+        self.description = description
+        self.body = body
+        self.dir = dir
+
+
+# discover_skills 扫 SKILLS_ROOT 下的每个子目录，读它的 SKILL.md。跟 octo
+# 真实实现一样宽容：目录里没有 SKILL.md、frontmatter 缺 description，
+# 就跳过这一个，不中断整个发现过程——一份写坏的说明书不该拖垮整个会话。
+# 目录名是权威的 skill 名，frontmatter 里写的 name 只是给人看的，不参与
+# 查找——这是 Claude Code 的行为，兼容它意味着别人写好的 skill 目录，
+# 挪过来就能用。os.scandir 比 os.listdir 多带一个 is_dir()，不用像先前
+# 那样再单独 os.path.isdir 补一次系统调用——跟 Go os.ReadDir 返回的
+# DirEntry 是同一个讲究。
+def discover_skills():
+    out = {}
+    try:
+        entries = os.scandir(SKILLS_ROOT)
+    except OSError:
+        return out
+    with entries:
+        for entry in entries:
+            if not entry.is_dir():
+                continue
+            try:
+                with open(os.path.join(entry.path, "SKILL.md"), encoding="utf-8") as f:
+                    data = f.read()
+            except OSError:
+                continue
+            desc, body, ok = parse_skill_file(data)
+            if not ok or not desc:
+                continue
+            out[entry.name] = Skill(entry.name, desc, body, entry.path)
+    return out
+
+
+# parse_skill_file 切开一份 SKILL.md：开头一对 "---" 之间是 frontmatter，
+# 之后是正文。frontmatter 只认一行一个 "key: value"，够用就好——真正的
+# Claude Code 格式用 yaml 库解析、能处理嵌套 metadata 块，这里手写的
+# 是一个只够识别 description 的子集，其余字段（allowed-tools、license
+# 之类）原样跳过，不报错也不生效。
+def parse_skill_file(text):
+    lines = text.split("\n")
+    if not lines or lines[0].strip() != "---":
+        return "", "", False
+    description = ""
+    i = 1
+    while i < len(lines):
+        if lines[i].strip() == "---":
+            break
+        if ":" in lines[i]:
+            key, _, val = lines[i].partition(":")
+            if key.strip() == "description":
+                description = val.strip()
+        i += 1
+    if i >= len(lines):
+        return "", "", False  # 没找到闭合的 "---"，frontmatter 不完整
+    body = "\n".join(lines[i + 1:]).strip()
+    return description, body, True
+
+
+# skill_manifest 渲染 L1 清单：每个 skill 只留名字和 description，这是
+# 模型判断"要不要用这个 skill"的唯一依据。正文不放这里——清单要塞进
+# 冻结的 system prompt，多数任务用不上大多数 skill，正文太贵，全塞进去
+# 不划算，留给 skill 工具按需加载才是这一层存在的意义。
+def skill_manifest(skills):
+    if not skills:
+        return ""
+    lines = ["# 可用的 skill", "",
+             "任务匹配某条 description 时，先调用 skill 工具（参数 name）加载完整指令再动手"
+             "——不要只凭这一句描述去猜正文写了什么。", ""]
+    # 顺序必须稳定，否则清单文本每次不同，缓存前缀跟着作废
+    for name in sorted(skills):
+        lines.append(f"- {name}: {skills[name].description}")
+    return "\n".join(lines).strip()
+
+
+# SkillTool 是 L2：清单只给名字和一句话，正文才是真正的指令，只有模型
+# 点名要用了才发。它需要访问这次进程发现到的 skills，不能像 ReadFileTool
+# 那样是无状态的，所以带一个字段。
+class SkillTool:
+    def __init__(self, skills):
+        self.skills = skills
+
+    def definition(self):
+        return {
+            "name": "skill",
+            "description": "加载一个 skill 的完整指令。先看系统提示里“可用的 skill”清单，"
+                           "任务匹配某条 description 时，用这个工具把对应 skill 的正文加载进来再动手。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "要加载的 skill 名字，清单里“-”后面那个词"},
+                },
+                "required": ["name"],
+            },
+        }
+
+    def execute(self, args):
+        try:
+            params = json.loads(args)
+        except json.JSONDecodeError as e:
+            return "错误: 参数不是合法 JSON: " + str(e)
+        name = params.get("name", "")
+        sk = self.skills.get(name)
+        if sk is None:
+            return "错误: 没有叫 " + name + " 的 skill——从系统提示的清单里选一个"
+        return f'[skill "{sk.name}"，所在目录：{sk.dir}]\n\n{sk.body}'
+
+
+# compose_system_prompt 把 BASE_PROMPT、项目规则、skill 清单、记忆拼成一份
+# system prompt，蒸馏自 octo Compose 的分层方式：每层之间用同一个分隔符
+# 隔开，某一层没有内容就跳过那一层。这份拼好的文字，从会话创建那一刻起
+# 冻结——练习 8 讲过为什么：中途改一个字，隐式缓存就整条作废。
+def compose_system_prompt(skills):
+    prompt = BASE_PROMPT
+    rules = read_project_rules()
+    if rules:
+        prompt += "\n\n---\n\n# 项目约定 (" + PROJECT_RULES_FILE + ")\n\n" + rules
+    manifest = skill_manifest(skills)
+    if manifest:
+        prompt += "\n\n---\n\n" + manifest
+    prompt += "\n\n---\n\n" + MEMORY_GUIDANCE
+    mem = read_memory()
+    if mem:
+        prompt += "\n\n## 你目前记下的内容\n\n" + mem
+    else:
+        prompt += "\n\n## 你目前记下的内容\n\n（还是空的——这是这个项目第一次有你可读的记忆）"
+    return prompt
+
+
+# ---- 预算层：知道自己还有多少余地 ----
+
+
+# context_window 返回一个模型的上下文窗口大小（token 数），蒸馏自 octo 里
+# 一张更大的模型-窗口对照表——按名字子串匹配，匹配不到就退回保守的默认值。
+# 宁可低估：低估最多让你提前一点行动，高估会让你真的撑爆上下文。
+def context_window(model):
+    m = model.lower()
+    if "deepseek" in m:
+        return 1_000_000
+    if "gpt-4" in m:
+        return 128_000
+    if "claude" in m:
+        return 200_000
+    return 128_000  # 不认识的模型，包括本机跑的大多数开源小模型
+
+
+# effective_context_window 让你在这一章的实验里用 CONTEXT_WINDOW 人为调小窗口。
+# 真实模型的窗口大到几十上百万 token，正常聊天几十轮都撞不上；这一章想让你
+# 在几轮之内亲眼看到预算告急，所以留了这个后门——不设就用 context_window 的
+# 真实值，这不是在否定真实模型的窗口有多大，只是为了让实验能在你的终端里
+# 几秒钟内跑完。
+def effective_context_window(model):
+    v = os.environ.get("CONTEXT_WINDOW", "")
+    if v:
+        try:
+            n = int(v)
+        except ValueError:
+            n = 0
+        if n > 0:
+            return n
+    return context_window(model)
+
+
+# BUDGET_FRACTION 是触发警告的门槛——占窗口的 75%，蒸馏自 octo 的
+# compactThresholdFraction：剩下的 25% 留给最近的对话尾巴和这一轮的输出。
+BUDGET_FRACTION = 0.75
+
+
+# check_budget 拿这一轮 API 真实回报的 token 数（不是估算值——练习 11 你
+# 已经知道 API 会把这个数字如实报回来）去跟窗口比，报告一句话，并且告诉
+# 调用方要不要开始压缩。练习 12 这个函数只喊话；这一章多了返回值，
+# 喊话之后，真的动手。
+def check_budget(used_tokens, window):
+    pct = used_tokens / window * 100
+    print(f"[预算：{used_tokens}/{window} tokens，{pct:.1f}%]", file=sys.stderr)
+    over = used_tokens >= window * BUDGET_FRACTION
+    if over:
+        print(f"⚠️  已用掉窗口的 {pct:.0f}%，接近上限——开始压缩", file=sys.stderr)
+    return over
+
+
+# estimate_tokens 是没有真实 token 数时的快速估算：ASCII 大约 4 个字符一个
+# token，中文这类多字节字符大约 1.5 个字符一个 token——不是真正的分词器，
+# 只是个够用的粗略数，在还没发出第一个请求、拿不到 API 真实回报之前，
+# 先给自己一个数量级。
+def estimate_tokens(msgs):
+    total = 0
+    for m in msgs:
+        total += estimate_text(m.get("content") or "")
+        for tc in m.get("tool_calls") or []:
+            total += estimate_text(tc["function"]["name"]) + estimate_text(tc["function"]["arguments"])
+    return total
+
+
+def estimate_text(s):
+    ascii_count, multi = 0, 0
+    for ch in s:
+        if ord(ch) < 128:
+            ascii_count += 1
+        else:
+            multi += len(ch.encode("utf-8"))
+    return ascii_count // 4 + int(multi / 1.5 + 0.5)
+
+
+# ---- 会话层：把 history 写到磁盘上 ----
+
+# SESSION_DIR 是会话文件存放的地方，跟 .trash 一样就在工作目录底下。
+SESSION_DIR = ".sessions"
+
+
+# Session 是一次对话的全部状态：一个 ID，加上完整的 history。persisted
+# 记录 history 里前多少条消息已经写盘——save 只补写 persisted 之后新增的
+# 部分，不是每次都把整个文件重写一遍。这是练习 11 的核心账本：存盘的代价
+# 只跟"这一轮新增了多少条"有关，跟"这场对话已经聊了多久"无关。
+# force_rewrite 是压缩加的：压缩会把 history 前半段整个换成一条摘要，
+# 磁盘上原来那些行不再对应现在的内容，下次 save 不能只追加，得整个重写。
+class Session:
+    def __init__(self, id, created_at="", history=None):
+        self.id = id
+        self.created_at = created_at
+        self.history = history if history is not None else []
+        self.persisted = 0
+        self.force_rewrite = False
+
+    # save 平时只追加 history[persisted:]；force_rewrite 被压缩置位之后，
+    # 磁盘上的旧行不再可信，改成整个截断重写。没有新消息、也没被标记
+    # force_rewrite 时是个空操作——一轮里模型只回了一句话，这次 save 什么都不写。
+    def save(self):
+        if self.force_rewrite:
+            return self.rewrite_all()
+        if len(self.history) == self.persisted:
+            return
+        return self.append_delta()
+
+    # append_delta 是练习 11 原来的 save：只补写 persisted 之后新增的部分。
+    def append_delta(self):
+        with open(session_path(self.id), "a", encoding="utf-8") as f:
+            for msg in self.history[self.persisted:]:
+                f.write(encode_record({"type": "message", "message": msg}))
+        self.persisted = len(self.history)
+
+    # rewrite_all 截断文件，把 meta 和当前完整的 history 重新写一遍——压缩
+    # 之后唯一正确的存盘方式：history 前半段的内容已经变了，追加只会把
+    # 新旧两份摘要和原文混在一起。
+    def rewrite_all(self):
+        with open(session_path(self.id), "w", encoding="utf-8") as f:
+            f.write(encode_record({"type": "meta", "id": self.id, "created_at": self.created_at}))
+            for msg in self.history:
+                f.write(encode_record({"type": "message", "message": msg}))
+        self.persisted = len(self.history)
+        self.force_rewrite = False
+
+
+# encode_record 把一条记录编成 JSONL 里的一行：紧凑、不换行、末尾补一个 \n。
+# ensure_ascii=False 让中文原样落盘，而不是变成 \uXXXX——文件是给人也能打开看的。
+def encode_record(rec):
+    return json.dumps(rec, ensure_ascii=False) + "\n"
+
+
+# new_session_id 生成 时间戳-随机后缀 形式的 ID：时间戳让它天然按时间排序、
+# 人眼可读；随机后缀避免同一秒内两个会话撞名。
+def new_session_id():
+    return time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(4)
+
+
+def session_path(id):
+    return os.path.join(SESSION_DIR, id + ".jsonl")
+
+
+# new_session_file 开一个新会话：建目录、写 meta 头，返回可以继续追加的 Session。
+def new_session_file(history):
+    os.makedirs(SESSION_DIR, exist_ok=True)
+    s = Session(new_session_id(), datetime.now().astimezone().isoformat(), history)
+    with open(session_path(s.id), "w", encoding="utf-8") as f:
+        f.write(encode_record({"type": "meta", "id": s.id, "created_at": s.created_at}))
+        for msg in history:
+            f.write(encode_record({"type": "message", "message": msg}))
+    s.persisted = len(history)
+    return s
+
+
+# load_session 读一份 JSONL，把 meta 和 message 记录重放回 history。
+# 最后一行如果不完整（进程写到一半时被杀），就连同它一起丢掉——
+# 半条消息比没有消息更危险：模型会把它当成一条完整的历史来读，
+# 而它实际上什么都不是。
+def load_session(id):
+    with open(session_path(id), "rb") as f:
+        data = f.read()
+    n = data.rfind(b"\n")
+    data = data[:n + 1] if n >= 0 else b""
+
+    s = Session(id)
+    for line in data.split(b"\n"):
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"会话文件损坏: {e}") from None
+        if rec.get("type") == "meta":
+            s.created_at = rec.get("created_at", "")
+        elif rec.get("type") == "message":
+            if rec.get("message") is not None:
+                s.history.append(rec["message"])
+    s.persisted = len(s.history)
+    return s
+
+
+# ---- 压缩层：不丢消息，是让模型总结它自己 ----
+
+# COMPACT_KEEP_FRACTION 压缩后留多少"最近尾巴"原样保留，蒸馏自 octo 的
+# defaultCompactKeepFraction：占窗口的 30%，但封顶不超过触发阈值的一半——
+# 保证一次压缩确实能把用量拉回阈值以下，不会刚压完又立刻撞线。
+COMPACT_KEEP_FRACTION = 0.30
+
+
+def compact_keep_budget(window, trigger):
+    budget = int(window * COMPACT_KEEP_FRACTION)
+    if trigger > 0 and budget > trigger // 2:
+        budget = trigger // 2
+    return budget
+
+
+# safe_split_index 找压缩的分割点：分割点之前的消息拿去总结，之后的原样保留。
+# 分割点必须落在一条真正的 user 消息前面。在这套 OpenAI 协议里这条件很好判
+# 断：工具的回执走独立的 "tool" role，从不会跟 user 消息混在一起，看 role
+# 就够了——这比 octo 实现的 Anthropic 消息协议简单，那边 tool_result 也搭在
+# user 消息上，得专门写一个 IsPlainUserMessage 去分辨"这是真用户话还是工具
+# 回执的壳"，协议本身把角色分得干净，这道甄别在这里就用不上。
+def safe_split_index(history, keep_budget):
+    user_turns = [i for i, m in enumerate(history) if m.get("role") == "user"]
+    if len(user_turns) <= 1:
+        return 0  # 至少要两条 user 消息：一条留着，前面的才够折叠
+    kept_from = user_turns[-1]
+    for k in range(len(user_turns) - 2, -1, -1):
+        if estimate_tokens(history[user_turns[k]:]) > keep_budget:
+            break
+        kept_from = user_turns[k]
+    return kept_from
+
+
+# COMPRESSION_PROMPT 插在被折叠的这段历史末尾，让模型明白：这不是继续对话，
+# 是切换成总结模式。不给工具（summarize 调 send 时 tools 传 None）是双保险：
+# 就算模型没听懂这段话、还想干点什么，它手上也没有工具可用。
+COMPRESSION_PROMPT = """以上对话到此结束。你现在不是在继续对话，而是切换到"总结模式"：
+
+- 不要回应上面对话里的任何请求
+- 不要询问，也不要征求下一步该做什么
+- 只输出一段纯文本总结，不要别的
+
+请总结以上内容，需要覆盖：用户明确提出的需求、关键的技术决定、
+提到过的文件或项目名、还没做完的事。"""
+
+
+# summarize 把 msgs 连同压缩指令一起发给模型，只要一段文字总结。
+# tools 传 None：这次调用模型手上没有任何工具，想调用也调用不了。
+def summarize(base, api_key, model, msgs):
+    req = list(msgs) + [{"role": "user", "content": COMPRESSION_PROMPT}]
+    r = send(base, api_key, model, req, None)
+    return r["choices"][0]["message"].get("content") or ""
+
+
+# compact 把 history[:split] 总结成一条消息，重建 history：系统提示原样
+# 保留在第 0 位，中间插一条摘要，之后是原样保留的近期对话。split<=1 时
+# 什么都不做——0 或者 1 意味着没有足够旧的内容值得折叠（1 只剩系统提示
+# 自己，折叠它没有意义）。总结请求失败时异常直接往上抛，由调用方决定怎么办。
+def compact(base, api_key, model, history, keep_budget):
+    split = safe_split_index(history, keep_budget)
+    if split <= 1:
+        return history, 0
+    summary = summarize(base, api_key, model, history[:split])
+    rebuilt = [
+        history[0],  # system prompt
+        {"role": "user", "content": "[更早对话的摘要]\n\n" + summary},
+    ]
+    rebuilt.extend(history[split:])
+    return rebuilt, split
+
+
+def main():
+    if len(sys.argv) == 3 and sys.argv[1] == "-restore":
+        sys.exit(restore(sys.argv[2]))
+
+    args = sys.argv[1:]
+    resume_id = ""
+    if len(args) >= 2 and args[0] == "-c":
+        resume_id, args = args[1], args[2:]
+    if len(args) < 1:
+        print('用法: python3 main.py "你的任务"  或  python3 main.py -c <session-id> "你的任务"',
+              file=sys.stderr)
+        sys.exit(1)
+    task = args[0]
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    model = os.environ.get("MODEL", "")
+    if not api_key or not model:
+        print("需要环境变量 OPENAI_API_KEY 和 MODEL", file=sys.stderr)
+        print("例: export OPENAI_API_KEY=sk-xxxx", file=sys.stderr)
+        print("    export MODEL=deepseek-v4-flash", file=sys.stderr)
+        print("    export OPENAI_BASE_URL=https://api.deepseek.com/v1  # 不设则默认 OpenAI 官方", file=sys.stderr)
+        sys.exit(1)
+    base = os.environ.get("OPENAI_BASE_URL", "") or "https://api.openai.com/v1"
+
+    # 全部工具在这里注册。加第五个工具 = 在这里加一行，别处一个字不用动。
+    skills = discover_skills()
+    tools = [ReadFileTool(), WriteFileTool(), EditFileTool(), BashTool()]
+    if skills:
+        # 一个 skill 都没发现就不挂 skill 工具——模型不该看见一个永远
+        # 调不出东西的空壳工具，蒸馏自 octo DefaultTools() 同一条判断。
+        tools.append(SkillTool(skills))
+    reg = Registry(*tools)
+
+    if resume_id:
+        try:
+            sess = load_session(resume_id)
+        except (OSError, ValueError) as e:
+            print(f"错误: 恢复会话失败: {e}", file=sys.stderr)
+            sys.exit(1)
+        print(f"[恢复会话 {sess.id}，已有 {len(sess.history)} 条消息]", file=sys.stderr)
+    else:
+        try:
+            sess = new_session_file([{"role": "system", "content": compose_system_prompt(skills)}])
+        except OSError as e:
+            print(f"错误: 创建会话文件失败: {e}", file=sys.stderr)
+            sys.exit(1)
+        print(f"[新建会话 {sess.id}]", file=sys.stderr)
+    sess.history.append({"role": "user", "content": task})
+
+    # 这一刻是估算值唯一有用武之地的时候：还没发出过任何请求，check_budget
+    # 依赖的真实数字根本不存在——尤其是 -c 恢复一个老会话时，history 可能已经
+    # 很大，你想在花钱之前先摸个底，能查的只有这个粗略估算。
+    window = effective_context_window(model)
+    pre_estimate = estimate_tokens(sess.history)
+    print(f"[窗口: {model} → {window} tokens（发出第一个请求前，估算值: {pre_estimate} tokens）]",
+          file=sys.stderr)
+    if pre_estimate >= window * BUDGET_FRACTION:
+        print("⚠️  恢复的历史估算下来已经接近预算上限，还没发请求就先说一声——真实数字要等第一轮回来才知道",
+              file=sys.stderr)
+
+    # agent loop 的结构和练习 5 完全一样。变化只有两处：
+    # 工具声明从注册表拿（reg.definitions），分发交给注册表（reg.execute）；
+    # history 现在是 sess.history，每轮跑完都 save 一次。
+    max_rounds = 10
+    for round_no in range(1, max_rounds + 1):
+        try:
+            r = send(base, api_key, model, sess.history, reg.definitions())
+        except Exception as e:
+            print(e, file=sys.stderr)
+            sys.exit(1)
+        choice = r["choices"][0]
+        msg = choice["message"]
+        sess.history.append(msg)
+        u = r.get("usage") or {}
+        cached = (u.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
+        if check_budget(u.get("prompt_tokens", 0), window):
+            trigger = int(window * BUDGET_FRACTION)
+            keep_budget = compact_keep_budget(window, trigger)
+            try:
+                rebuilt, folded = compact(base, api_key, model, sess.history, keep_budget)
+            except Exception as e:
+                print(f"警告: 压缩失败，继续用未压缩的历史: {e}", file=sys.stderr)
+            else:
+                if folded > 0:
+                    print(f"[压缩：把前 {folded} 条消息折叠成一条摘要，{len(sess.history)} 条 → {len(rebuilt)} 条]",
+                          file=sys.stderr)
+                    sess.history = rebuilt
+                    sess.force_rewrite = True
+                else:
+                    print("[压缩：还没有两条完整的用户消息可折叠，跳过这一轮]", file=sys.stderr)
+
+        if choice.get("finish_reason") != "tool_calls":
+            print(msg.get("content") or "", flush=True)
+            print(f"\n[共 {round_no} 轮 · 最后一轮输入 {u.get('prompt_tokens', 0)} tokens"
+                  f"（命中缓存 {cached}）· finish_reason={choice.get('finish_reason')}]", file=sys.stderr)
+            try:
+                sess.save()
+            except OSError as e:
+                print(f"警告: 会话保存失败: {e}", file=sys.stderr)
+            print(f"[会话 ID: {sess.id}，用 -c {sess.id} 继续]", file=sys.stderr)
+            return
+
+        print(f"[round {round_no} 输入 {u.get('prompt_tokens', 0)} tokens，命中缓存 {cached}]",
+              file=sys.stderr)
+        for tc in msg.get("tool_calls") or []:
+            print(f"[round {round_no}] {tc['function']['name']}({tc['function']['arguments']})",
+                  file=sys.stderr)
+            result = reg.execute(tc["function"]["name"], tc["function"]["arguments"])
+            sess.history.append({
+                "role": "tool",
+                "tool_call_id": tc["id"],
+                "content": result,
+            })
+        try:
+            sess.save()
+        except OSError as e:
+            print(f"警告: 会话保存失败: {e}", file=sys.stderr)
+
+    print(f"达到 {max_rounds} 轮上限，停止。", file=sys.stderr)
+    sys.exit(1)
+
+
+def send(base, api_key, model, history, tools):
+    payload = {
+        "model": model,
+        "max_tokens": 4096,
+        "messages": history,
+    }
+    # tools 为 None 时整个键都不发——Go 版靠 omitempty 自动做到这一点，
+    # Python 的 json.dumps 会把 None 老实写成 null，服务端不一定认，得手动省掉。
+    if tools:
+        payload["tools"] = tools
+    body = json.dumps(payload).encode()
+    req = urllib.request.Request(
+        base + "/chat/completions",
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": "Bearer " + api_key,
+        },
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            raw = resp.read()
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"HTTP {e.code}: {e.read().decode(errors='replace')}") from None
+    except OSError as e:
+        raise RuntimeError(f"请求失败: {e}") from None
+
+    try:
+        r = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"解析失败: {e}\n原始响应: {raw.decode(errors='replace')}") from None
+    if r.get("error"):
+        raise RuntimeError(f"API 错误 [{r['error'].get('type')}]: {r['error'].get('message')}")
+    if not r.get("choices"):
+        raise RuntimeError(f"空响应: {raw.decode(errors='replace')}")
+    return r
+
+
+if __name__ == "__main__":
+    main()
