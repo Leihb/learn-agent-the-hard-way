@@ -1,0 +1,9 @@
+{
+  "name": "learn-agent-the-hard-way-ex30",
+  "private": true,
+  "description": "练习 30：浏览器——通过 CDP 驱动 Chrome。全书 JS 版第一次需要 npm install。",
+  "type": "module",
+  "dependencies": {
+    "ws": "^8.21.3"
+  }
+}
