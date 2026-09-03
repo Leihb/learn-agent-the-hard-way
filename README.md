@@ -1,8 +1,5 @@
 # 笨办法学 Agent · 亲手打造一个 harness
 
-> 同系列第二本《[笨办法学 Agent · 用 LangGraph 上线](https://github.com/Leihb/langgraph-in-action)》
-> 用框架把场景 agent 做出来、放到线上，不需要先读完这一本。
-
 **从 60 行代码开始，亲手写出一个 agent。**
 
 **agent = LLM + tool use。** 模型你改不了，循环只有几十行——一个 agent 和另一个 agent
@@ -12,6 +9,19 @@
 
 书中代码不是教学玩具：每一段都从一个真实生产 harness（[octo](https://github.com/open-octo/octo-agent)，
 作者从零写的开源 agent）蒸馏而来。
+
+## 这套书一共三本
+
+《笨办法学 Agent》系列现在有三本，各自独立，不要求先后顺序：
+
+- **[笨办法学 Agent · 亲手打造一个 harness](https://github.com/Leihb/learn-agent-the-hard-way)（这一本）**——
+  不用任何框架，32 个练习亲手写出一个 agent harness 的每一层，目的是看懂。
+- **[笨办法学 Agent · 用 LangGraph 上线](https://github.com/Leihb/langgraph-in-action)**——
+  用 LangGraph 把真实场景的 agent 做出来、放到线上给人用，目的是上线。
+- **[让 agent 替你干活 · 不写代码，用 octo 把活干完](https://github.com/Leihb/octo-at-work)**——
+  不写一行代码，用装在自己电脑上的 octo 把日常的活干完，给不写代码的打工人。
+
+三本共享同一句话：agent 没有秘密架构，会不会用，看你会不会把活/场景/工具边界说清楚。
 
 ## 📖 在线阅读
 
