@@ -1,5 +1,5 @@
 [book]
-title = "笨办法学 Agent · Learn Agent the Hard Way"
+title = "笨办法学 Agent · 亲手打造一个 harness"
 description = "《笨办法学 Agent：从 60 行代码到一个完整的 harness》。从一次 API 调用开始，亲手写出一个能跑工具循环、subagent、MCP、沙箱和浏览器的 agent harness。"
 authors = ["Roy Lei"]
 language = "zh-CN"

@@ -1,6 +1,7 @@
-# 笨办法学 Agent · Learn Agent the Hard Way
+# 笨办法学 Agent · 亲手打造一个 harness
 
-**《笨办法学 Agent：从 60 行代码到一个完整的 harness》**
+> 同系列第二本《[笨办法学 Agent · 用 LangGraph 上线](https://github.com/Leihb/langgraph-in-action)》
+> 用框架把场景 agent 做出来、放到线上，不需要先读完这一本。
 
 **从 60 行代码开始，亲手写出一个 agent。**
 
