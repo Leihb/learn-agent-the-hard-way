@@ -25,7 +25,7 @@
 
 ## 📖 在线阅读
 
-**https://leihb.github.io/learn-agent-the-hard-way/**
+**https://leihb.com/learn-agent-the-hard-way/**
 
 ## 怎么读
 
